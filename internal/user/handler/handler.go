@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
 
 	"migrated-app/internal/httpx"
@@ -90,6 +91,38 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	for _, rt := range routes {
 		for _, p := range rt.paths {
 			mux.Handle(rt.method+" "+p, h.errs.Handle(rt.fn))
+		}
+	}
+}
+
+// RegisterChi adds every user route to a chi router. Path parameters are
+// copied into the request's PathValue store so the handlers can read them
+// with r.PathValue, exactly as with ServeMux.
+func (h *Handler) RegisterChi(r chi.Router) {
+	routes := []struct {
+		method string
+		paths  []string
+		params []string
+		fn     httpx.HandlerFunc
+	}{
+		{http.MethodPost, []string{"/save_user_data", "/save_user_data/"}, nil, h.saveUser},
+		{http.MethodGet, []string{"/get_user_data", "/get_user_data/"}, nil, h.fetchUserList},
+		{http.MethodGet, []string{"/get_user_data/{id}", "/get_user_data/{id}/"}, []string{"id"}, h.fetchUserByID},
+		{http.MethodDelete, []string{"/delete_user_data/{id}", "/delete_user_data/{id}/"}, []string{"id"}, h.deleteUser},
+		{http.MethodPut, []string{"/update_user_data/{id}", "/update_user_data/{id}/"}, []string{"id"}, h.updateUser},
+		{http.MethodGet, []string{"/get_user_name/name/{name}", "/get_user_name/name/{name}/"}, []string{"name"}, h.getUserNameByName},
+	}
+	for _, rt := range routes {
+		inner := h.errs.Handle(rt.fn)
+		params := rt.params
+		wrapped := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			for _, p := range params {
+				req.SetPathValue(p, chi.URLParam(req, p))
+			}
+			inner.ServeHTTP(w, req)
+		})
+		for _, p := range rt.paths {
+			r.Method(rt.method, p, wrapped)
 		}
 	}
 }
