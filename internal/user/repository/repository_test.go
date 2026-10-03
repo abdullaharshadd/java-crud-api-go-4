@@ -1,4 +1,4 @@
-package user
+package repository
 
 import (
 	"context"
@@ -293,7 +293,7 @@ func (s *store) rowCount() int {
 	return len(s.rows)
 }
 
-func newTestRepo(t *testing.T) (*MySQLRepository, *store) {
+func newTestRepo(t *testing.T) (*MySQLUserDao, *store) {
 	t.Helper()
 	dsn := fmt.Sprintf("db-%d", atomic.AddInt64(&dsnSeq, 1))
 	s := &store{fail: map[string]error{}}
@@ -314,7 +314,7 @@ func mkUser(name, email string) *User {
 	return &User{Name: strp(name), Email: strp(email), Password: strp("root"), Role: strp("java developer"), About: strp("Sr")}
 }
 
-func mustSave(t *testing.T, r *MySQLRepository, u *User) *User {
+func mustSave(t *testing.T, r *MySQLUserDao, u *User) *User {
 	t.Helper()
 	saved, err := r.Save(context.Background(), u)
 	if err != nil {
