@@ -17,6 +17,7 @@ import (
 
 	"migrated-app/internal/config"
 	"migrated-app/internal/httpx"
+	"migrated-app/internal/user"
 	"migrated-app/internal/user/handler"
 	"migrated-app/internal/user/repository"
 )
