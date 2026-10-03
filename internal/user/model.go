@@ -8,12 +8,11 @@
 // package, which every layer using the User model does, therefore gets the
 // table without an extra step. EnsureSchema is also exported, so main or tests
 // can apply the schema explicitly to a *sql.DB they already own.
-package model
+package user
 
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -25,9 +24,6 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 )
-
-// ErrValidation is returned by Validate when a User violates a constraint.
-var ErrValidation = errors.New("validation failed")
 
 // NameRequiredMessage is the @NotBlank message from the source model. The
 // wording, including the reference to a department, is preserved verbatim.
