@@ -9,323 +9,245 @@ import (
 	"migrated-app/internal/user/repository"
 )
 
-// fakeDao is an in-memory repository.UserDao used to test the service layer.
 type fakeDao struct {
-	users  map[int]*repository.User
-	nextID int
+	repository.UserDao // embedded nil; unused methods panic
 
-	saveErr     error
-	findAllErr  error
-	findByIDErr error
-	deleteErr   error
-	findNameErr error
-	nilFindAll  bool
+	saveFn       func(ctx context.Context, u *repository.User) (*repository.User, error)
+	findAllFn    func(ctx context.Context) ([]*repository.User, error)
+	findByIDFn   func(ctx context.Context, id int) (*repository.User, bool, error)
+	deleteByIDFn func(ctx context.Context, id int) error
+	findByNameFn func(ctx context.Context, name string) (*repository.User, bool, error)
 
-	saveCalls   int
-	deleteCalls int
-	lastSaved   *repository.User
-}
-
-func newFakeDao() *fakeDao {
-	return &fakeDao{users: map[int]*repository.User{}, nextID: 1}
-}
-
-func copyUser(u *repository.User) *repository.User {
-	c := *u
-	return &c
+	saveCalls   []*repository.User
+	saveIDs     []int
+	deleteCalls []int
+	nameCalls   []string
 }
 
 func (f *fakeDao) Save(ctx context.Context, u *repository.User) (*repository.User, error) {
-	f.saveCalls++
-	f.lastSaved = u
-	if f.saveErr != nil {
-		return nil, f.saveErr
+	f.saveCalls = append(f.saveCalls, u)
+	if u != nil {
+		f.saveIDs = append(f.saveIDs, u.ID)
 	}
-	if u.ID == 0 {
-		u.ID = f.nextID
-		f.nextID++
-		f.users[u.ID] = copyUser(u)
-		return u, nil
-	}
-	if _, ok := f.users[u.ID]; ok {
-		f.users[u.ID] = copyUser(u)
-		return copyUser(u), nil
-	}
-	m := copyUser(u)
-	m.ID = f.nextID
-	f.nextID++
-	f.users[m.ID] = copyUser(m)
-	return m, nil
+	return f.saveFn(ctx, u)
 }
-
-func (f *fakeDao) SaveAll(ctx context.Context, users []*repository.User) ([]*repository.User, error) {
-	out := []*repository.User{}
-	for _, u := range users {
-		s, err := f.Save(ctx, u)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, s)
-	}
-	return out, nil
-}
-
+func (f *fakeDao) FindAll(ctx context.Context) ([]*repository.User, error) { return f.findAllFn(ctx) }
 func (f *fakeDao) FindByID(ctx context.Context, id int) (*repository.User, bool, error) {
-	if f.findByIDErr != nil {
-		return nil, false, f.findByIDErr
-	}
-	u, ok := f.users[id]
-	if !ok {
-		return nil, false, nil
-	}
-	return copyUser(u), true, nil
+	return f.findByIDFn(ctx, id)
 }
-
-func (f *fakeDao) ExistsByID(ctx context.Context, id int) (bool, error) {
-	_, ok := f.users[id]
-	return ok, nil
-}
-
-func (f *fakeDao) FindAll(ctx context.Context) ([]*repository.User, error) {
-	if f.findAllErr != nil {
-		return nil, f.findAllErr
-	}
-	if f.nilFindAll {
-		return nil, nil
-	}
-	out := make([]*repository.User, 0, len(f.users))
-	for i := 1; i < f.nextID; i++ {
-		if u, ok := f.users[i]; ok {
-			out = append(out, copyUser(u))
-		}
-	}
-	return out, nil
-}
-
-func (f *fakeDao) FindAllSorted(ctx context.Context, s repository.Sort) ([]*repository.User, error) {
-	return f.FindAll(ctx)
-}
-
-func (f *fakeDao) FindAllPaged(ctx context.Context, p repository.PageRequest) (repository.Page, error) {
-	return repository.Page{}, nil
-}
-
-func (f *fakeDao) FindAllByID(ctx context.Context, ids []int) ([]*repository.User, error) {
-	return nil, nil
-}
-
-func (f *fakeDao) Count(ctx context.Context) (int64, error) { return int64(len(f.users)), nil }
-
 func (f *fakeDao) DeleteByID(ctx context.Context, id int) error {
-	f.deleteCalls++
-	if f.deleteErr != nil {
-		return f.deleteErr
-	}
-	if _, ok := f.users[id]; !ok {
-		return errors.New("user repository: wrap: " + repository.ErrNothingDeleted.Error())
-	}
-	delete(f.users, id)
-	return nil
+	f.deleteCalls = append(f.deleteCalls, id)
+	return f.deleteByIDFn(ctx, id)
 }
-
-func (f *fakeDao) Delete(ctx context.Context, u *repository.User) error      { return nil }
-func (f *fakeDao) DeleteAllByID(ctx context.Context, ids []int) error         { return nil }
-func (f *fakeDao) DeleteAll(ctx context.Context) error                        { f.users = map[int]*repository.User{}; return nil }
-
 func (f *fakeDao) FindByName(ctx context.Context, name string) (*repository.User, bool, error) {
-	if f.findNameErr != nil {
-		return nil, false, f.findNameErr
-	}
-	var found []*repository.User
-	for _, u := range f.users {
-		if u.Name != nil && *u.Name == name {
-			found = append(found, u)
-		}
-	}
-	switch len(found) {
-	case 0:
-		return nil, false, nil
-	case 1:
-		return copyUser(found[0]), true, nil
-	default:
-		return nil, false, repository.ErrNotUnique
-	}
+	f.nameCalls = append(f.nameCalls, name)
+	return f.findByNameFn(ctx, name)
 }
-
-var _ repository.UserDao = (*fakeDao)(nil)
 
 func sp(s string) *string { return &s }
 
-// seed stores users directly in the fake, bypassing the service.
-func (f *fakeDao) seed(names ...string) {
-	for _, n := range names {
-		u := &repository.User{ID: f.nextID, Name: sp(n), Email: sp(n + "@x.io")}
-		f.users[u.ID] = u
-		f.nextID++
+func hemraj() *repository.User {
+	return &repository.User{ID: 3, Name: sp("hemraj"), Email: sp("hemrajmalhi1234@gmail.com"),
+		About: sp("Sr"), Password: sp("root"), Role: sp("java developer")}
+}
+
+var errDB = errors.New("db down")
+
+func TestNewService(t *testing.T) {
+	if NewService(&fakeDao{}) == nil {
+		t.Fatal("NewService returned nil")
+	}
+}
+
+func TestGetUserNameByName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		dao      func(context.Context, string) (*repository.User, bool, error)
+		wantUser bool
+		wantOK   bool
+		wantErr  []error
+	}{
+		{"found", "hemraj", func(context.Context, string) (*repository.User, bool, error) { return hemraj(), true, nil }, true, true, nil},
+		{"not found", "nobody", func(context.Context, string) (*repository.User, bool, error) { return nil, false, nil }, false, false, nil},
+		{"not unique", "dup", func(context.Context, string) (*repository.User, bool, error) {
+			return nil, false, repository.ErrNotUnique
+		}, false, false, []error{ErrNotUnique, repository.ErrNotUnique}},
+		{"db error", "x", func(context.Context, string) (*repository.User, bool, error) { return nil, false, errDB }, false, false, []error{errDB}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeDao{findByNameFn: tt.dao}
+			u, ok, err := NewService(f).GetUserNameByName(context.Background(), tt.input)
+			if len(tt.wantErr) == 0 && err != nil {
+				t.Fatalf("unexpected err %v", err)
+			}
+			for _, want := range tt.wantErr {
+				if !errors.Is(err, want) {
+					t.Errorf("err %v does not match %v", err, want)
+				}
+			}
+			if len(tt.wantErr) > 0 && errors.Is(err, ErrNotUnique) != errors.Is(tt.wantErr[0], ErrNotUnique) {
+				t.Errorf("unexpected ErrNotUnique match: %v", err)
+			}
+			if ok != tt.wantOK {
+				t.Errorf("ok=%v want %v", ok, tt.wantOK)
+			}
+			if tt.wantUser {
+				if u == nil || u.Name == nil || *u.Name != tt.input {
+					t.Errorf("user name mismatch: %+v", u)
+				}
+			} else if u != nil {
+				t.Errorf("expected nil user, got %+v", u)
+			}
+			if len(f.nameCalls) != 1 || f.nameCalls[0] != tt.input {
+				t.Errorf("dao called with %v", f.nameCalls)
+			}
+			if len(f.saveCalls) != 0 || len(f.deleteCalls) != 0 {
+				t.Error("read-only operation modified data")
+			}
+		})
 	}
 }
 
 func TestSaveUser(t *testing.T) {
-	dbErr := errors.New("duplicate entry for uk_user_email")
 	tests := []struct {
-		name      string
-		setup     func(*fakeDao)
-		input     *repository.User
-		wantErrIs error
-		wantID    int
-		wantName  string
-		wantCount int
+		name    string
+		in      *repository.User
+		saveFn  func(context.Context, *repository.User) (*repository.User, error)
+		wantID  int
+		wantErr []error
+		calls   int
 	}{
-		{
-			name:      "new user gets generated id",
-			setup:     func(f *fakeDao) {},
-			input:     &repository.User{Name: sp("alice"), Email: sp("a@x.io")},
-			wantID:    1,
-			wantName:  "alice",
-			wantCount: 1,
-		},
-		{
-			name:      "existing id is overwritten",
-			setup:     func(f *fakeDao) { f.seed("old") },
-			input:     &repository.User{ID: 1, Name: sp("new"), Email: sp("n@x.io")},
-			wantID:    1,
-			wantName:  "new",
-			wantCount: 1,
-		},
-		{
-			name:      "persistence error propagated",
-			setup:     func(f *fakeDao) { f.saveErr = dbErr },
-			input:     &repository.User{Name: sp("dup")},
-			wantErrIs: dbErr,
-			wantCount: 0,
-		},
-		{
-			name:      "nil user is validation error",
-			setup:     func(f *fakeDao) {},
-			input:     nil,
-			wantErrIs: ErrValidation,
-			wantCount: 0,
-		},
+		{"new user gets id", &repository.User{Name: sp("a")}, func(_ context.Context, u *repository.User) (*repository.User, error) {
+			u.ID = 10
+			return u, nil
+		}, 10, nil, 1},
+		{"existing user updated", hemraj(), func(_ context.Context, u *repository.User) (*repository.User, error) {
+			c := *u
+			return &c, nil
+		}, 3, nil, 1},
+		{"dao error", &repository.User{}, func(context.Context, *repository.User) (*repository.User, error) { return nil, errDB }, 0, []error{errDB}, 1},
+		{"nil user", nil, nil, 0, []error{ErrValidation}, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dao := newFakeDao()
-			tt.setup(dao)
-			svc := NewService(dao)
-			got, err := svc.SaveUser(context.Background(), tt.input)
-			if tt.wantErrIs != nil {
-				if !errors.Is(err, tt.wantErrIs) {
-					t.Fatalf("err = %v, want %v", err, tt.wantErrIs)
-				}
-				if got != nil {
-					t.Fatalf("expected nil user, got %+v", got)
-				}
-				if tt.input == nil && dao.saveCalls != 0 {
-					t.Fatalf("dao.Save called for nil user")
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("unexpected err: %v", err)
-				}
-				if got.ID != tt.wantID || got.Name == nil || *got.Name != tt.wantName {
-					t.Fatalf("got %+v", got)
-				}
-				fetched, err := svc.FetchUserByID(context.Background(), got.ID)
-				if err != nil || !reflect.DeepEqual(fetched, got) {
-					t.Fatalf("fetch after save = %+v, %v; want %+v", fetched, err, got)
+			var returned *repository.User
+			f := &fakeDao{}
+			if tt.saveFn != nil {
+				f.saveFn = func(ctx context.Context, u *repository.User) (*repository.User, error) {
+					r, err := tt.saveFn(ctx, u)
+					returned = r
+					return r, err
 				}
 			}
-			if len(dao.users) != tt.wantCount {
-				t.Fatalf("stored = %d, want %d", len(dao.users), tt.wantCount)
+			got, err := NewService(f).SaveUser(context.Background(), tt.in)
+			if len(f.saveCalls) != tt.calls {
+				t.Fatalf("save calls=%d want %d", len(f.saveCalls), tt.calls)
+			}
+			if len(tt.wantErr) > 0 {
+				if got != nil {
+					t.Errorf("expected nil result")
+				}
+				for _, w := range tt.wantErr {
+					if !errors.Is(err, w) {
+						t.Errorf("err %v not %v", err, w)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err %v", err)
+			}
+			if got != returned {
+				t.Error("result is not repository's saved entity")
+			}
+			if got.ID != tt.wantID {
+				t.Errorf("id=%d want %d", got.ID, tt.wantID)
 			}
 		})
 	}
 }
 
 func TestFetchUserList(t *testing.T) {
-	dbErr := errors.New("db down")
+	users := []*repository.User{hemraj(), {ID: 4, Name: sp("b")}}
 	tests := []struct {
 		name    string
-		setup   func(*fakeDao)
-		wantLen int
-		wantErr error
+		ret     []*repository.User
+		err     error
+		want    []*repository.User
+		wantErr bool
 	}{
-		{"users exist", func(f *fakeDao) { f.seed("a", "b", "c") }, 3, nil},
-		{"empty store", func(f *fakeDao) {}, 0, nil},
-		{"dao returns nil slice", func(f *fakeDao) { f.nilFindAll = true }, 0, nil},
-		{"dao error", func(f *fakeDao) { f.findAllErr = dbErr }, 0, dbErr},
+		{"users exist", users, nil, users, false},
+		{"nil from dao becomes empty", nil, nil, []*repository.User{}, false},
+		{"empty", []*repository.User{}, nil, []*repository.User{}, false},
+		{"error", nil, errDB, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dao := newFakeDao()
-			tt.setup(dao)
-			before := len(dao.users)
-			got, err := NewService(dao).FetchUserList(context.Background())
-			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("err = %v", err)
+			f := &fakeDao{findAllFn: func(context.Context) ([]*repository.User, error) { return tt.ret, tt.err }}
+			got, err := NewService(f).FetchUserList(context.Background())
+			if tt.wantErr {
+				if !errors.Is(err, errDB) || got != nil {
+					t.Fatalf("got %v, %v", got, err)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
+				t.Fatal(err)
 			}
 			if got == nil {
-				t.Fatal("list must never be nil")
+				t.Fatal("nil slice")
 			}
-			if len(got) != tt.wantLen {
-				t.Fatalf("len = %d, want %d", len(got), tt.wantLen)
-			}
-			if len(dao.users) != before || dao.saveCalls != 0 || dao.deleteCalls != 0 {
-				t.Fatal("read operation mutated store")
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got %v want %v", got, tt.want)
 			}
 		})
 	}
 }
 
 func TestFetchUserByID(t *testing.T) {
-	dbErr := errors.New("db down")
 	tests := []struct {
-		name         string
-		setup        func(*fakeDao)
-		id           int
-		wantNotFound bool
-		wantErr      error
+		name     string
+		u        *repository.User
+		ok       bool
+		err      error
+		notFound bool
 	}{
-		{"existing", func(f *fakeDao) { f.seed("a", "b") }, 2, false, nil},
-		{"missing", func(f *fakeDao) { f.seed("a") }, 99, true, nil},
-		{"dao error", func(f *fakeDao) { f.findByIDErr = dbErr }, 1, false, dbErr},
+		{"exists", hemraj(), true, nil, false},
+		{"missing", nil, false, nil, true},
+		{"db error", nil, false, errDB, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dao := newFakeDao()
-			tt.setup(dao)
-			got, err := NewService(dao).FetchUserByID(context.Background(), tt.id)
+			var gotID int
+			f := &fakeDao{findByIDFn: func(_ context.Context, id int) (*repository.User, bool, error) {
+				gotID = id
+				return tt.u, tt.ok, tt.err
+			}}
+			got, err := NewService(f).FetchUserByID(context.Background(), 3)
+			if gotID != 3 {
+				t.Errorf("dao id=%d", gotID)
+			}
 			switch {
-			case tt.wantNotFound:
-				if !errors.Is(err, ErrUserNotFound) {
-					t.Fatalf("err = %v, want ErrUserNotFound", err)
+			case tt.notFound:
+				if got != nil || !errors.Is(err, ErrUserNotFound) {
+					t.Fatalf("got %v, %v", got, err)
 				}
 				var nf *NotFoundError
 				if !errors.As(err, &nf) {
-					t.Fatalf("err is not *NotFoundError: %T", err)
+					t.Errorf("not *NotFoundError: %T", err)
 				}
 				if err.Error() != UserNotFoundMessage {
-					t.Fatalf("message = %q", err.Error())
+					t.Errorf("msg %q", err.Error())
 				}
-				if got != nil {
-					t.Fatal("expected nil user")
-				}
-			case tt.wantErr != nil:
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("err = %v", err)
-				}
-				if errors.Is(err, ErrUserNotFound) {
-					t.Fatal("db error must not be not-found")
+			case tt.err != nil:
+				if got != nil || !errors.Is(err, tt.err) || errors.Is(err, ErrUserNotFound) {
+					t.Fatalf("got %v, %v", got, err)
 				}
 			default:
-				if err != nil || got == nil || got.ID != tt.id {
-					t.Fatalf("got %+v, %v", got, err)
+				if err != nil || got != tt.u {
+					t.Fatalf("got %v, %v", got, err)
 				}
 			}
 		})
@@ -333,183 +255,110 @@ func TestFetchUserByID(t *testing.T) {
 }
 
 func TestDeleteUser(t *testing.T) {
-	dbErr := errors.New("db down")
 	tests := []struct {
-		name          string
-		setup         func(*fakeDao)
-		id            int
-		wantErr       error
-		wantNothing   bool
-		wantRemaining int
+		name    string
+		daoErr  error
+		wantErr []error
 	}{
-		{"existing", func(f *fakeDao) { f.seed("a", "b") }, 1, nil, false, 1},
-		{"missing", func(f *fakeDao) { f.seed("a") }, 42, nil, true, 1},
-		{"dao error", func(f *fakeDao) { f.seed("a"); f.deleteErr = dbErr }, 1, dbErr, false, 1},
+		{"exists", nil, nil},
+		{"nothing deleted", repository.ErrNothingDeleted, []error{ErrNothingDeleted, repository.ErrNothingDeleted}},
+		{"db error", errDB, []error{errDB}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dao := newFakeDao()
-			tt.setup(dao)
-			svc := NewService(dao)
-			err := svc.DeleteUser(context.Background(), tt.id)
-			switch {
-			case tt.wantNothing:
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				if errors.Is(err, ErrUserNotFound) {
-					t.Fatal("delete must not report user-not-found")
-				}
-			case tt.wantErr != nil:
-				if !errors.Is(err, tt.wantErr) || errors.Is(err, ErrNothingDeleted) {
-					t.Fatalf("err = %v", err)
-				}
-			default:
-				if err != nil {
-					t.Fatalf("unexpected err: %v", err)
-				}
-				if _, err := svc.FetchUserByID(context.Background(), tt.id); !errors.Is(err, ErrUserNotFound) {
-					t.Fatalf("after delete err = %v", err)
+			f := &fakeDao{deleteByIDFn: func(context.Context, int) error { return tt.daoErr }}
+			err := NewService(f).DeleteUser(context.Background(), 7)
+			if len(f.deleteCalls) != 1 || f.deleteCalls[0] != 7 {
+				t.Errorf("delete calls %v", f.deleteCalls)
+			}
+			if len(tt.wantErr) == 0 && err != nil {
+				t.Fatal(err)
+			}
+			for _, w := range tt.wantErr {
+				if !errors.Is(err, w) {
+					t.Errorf("err %v not %v", err, w)
 				}
 			}
-			if len(dao.users) != tt.wantRemaining {
-				t.Fatalf("remaining = %d, want %d", len(dao.users), tt.wantRemaining)
+			if tt.daoErr == errDB && errors.Is(err, ErrNothingDeleted) {
+				t.Error("generic error should not map to ErrNothingDeleted")
 			}
 		})
 	}
 }
 
-// wrappingDeleteDao returns a properly wrapped repository.ErrNothingDeleted.
-type wrappingDeleteDao struct{ *fakeDao }
-
-func (w wrappingDeleteDao) DeleteByID(ctx context.Context, id int) error {
-	return errors.Join(errors.New("user repository: delete"), repository.ErrNothingDeleted)
-}
-
-func TestDeleteUserMapsNothingDeleted(t *testing.T) {
-	err := NewService(wrappingDeleteDao{newFakeDao()}).DeleteUser(context.Background(), 7)
-	if !errors.Is(err, ErrNothingDeleted) {
-		t.Fatalf("err = %v, want ErrNothingDeleted", err)
+func TestDeleteThenFetchNotFound(t *testing.T) {
+	store := map[int]*repository.User{3: hemraj()}
+	f := &fakeDao{
+		deleteByIDFn: func(_ context.Context, id int) error {
+			if _, ok := store[id]; !ok {
+				return repository.ErrNothingDeleted
+			}
+			delete(store, id)
+			return nil
+		},
+		findByIDFn: func(_ context.Context, id int) (*repository.User, bool, error) {
+			u, ok := store[id]
+			return u, ok, nil
+		},
 	}
-	if !errors.Is(err, repository.ErrNothingDeleted) {
-		t.Fatalf("err = %v, want repository.ErrNothingDeleted preserved", err)
+	s := NewService(f)
+	if err := s.DeleteUser(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.FetchUserByID(context.Background(), 3); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("want not found, got %v", err)
 	}
 }
 
 func TestUpdateUser(t *testing.T) {
-	dbErr := errors.New("db down")
 	tests := []struct {
-		name      string
-		setup     func(*fakeDao)
-		id        int
-		input     *repository.User
-		wantErr   error
-		check     func(t *testing.T, f *fakeDao)
+		name    string
+		id      int
+		in      *repository.User
+		daoErr  error
+		wantErr []error
 	}{
-		{
-			name:  "existing id updated",
-			setup: func(f *fakeDao) { f.seed("a", "b") },
-			id:    2,
-			input: &repository.User{ID: 999, Name: sp("bee")},
-			check: func(t *testing.T, f *fakeDao) {
-				if f.lastSaved.ID != 2 {
-					t.Fatalf("saved id = %d, want 2", f.lastSaved.ID)
-				}
-				if *f.users[2].Name != "bee" || *f.users[1].Name != "a" || len(f.users) != 2 {
-					t.Fatalf("unexpected store: %+v", f.users)
-				}
-			},
-		},
-		{
-			name:  "missing id inserts new row",
-			setup: func(f *fakeDao) { f.seed("a") },
-			id:    50,
-			input: &repository.User{Name: sp("z")},
-			check: func(t *testing.T, f *fakeDao) {
-				if len(f.users) != 2 || *f.users[1].Name != "a" {
-					t.Fatalf("unexpected store: %+v", f.users)
-				}
-			},
-		},
-		{
-			name:    "nil user",
-			setup:   func(f *fakeDao) {},
-			id:      1,
-			input:   nil,
-			wantErr: ErrValidation,
-			check: func(t *testing.T, f *fakeDao) {
-				if f.saveCalls != 0 {
-					t.Fatal("save should not be called")
-				}
-			},
-		},
-		{
-			name:    "dao error",
-			setup:   func(f *fakeDao) { f.saveErr = dbErr },
-			id:      1,
-			input:   &repository.User{Name: sp("x")},
-			wantErr: dbErr,
-			check:   func(t *testing.T, f *fakeDao) {},
-		},
+		{"overrides id", 5, &repository.User{ID: 99, Name: sp("new"), Email: sp("e")}, nil, nil},
+		{"sets id on zero", 3, &repository.User{Name: sp("x")}, nil, nil},
+		{"dao error", 5, &repository.User{}, errDB, []error{errDB}},
+		{"nil user", 5, nil, nil, []error{ErrValidation}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dao := newFakeDao()
-			tt.setup(dao)
-			err := NewService(dao).UpdateUser(context.Background(), tt.id, tt.input)
-			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			f := &fakeDao{saveFn: func(_ context.Context, u *repository.User) (*repository.User, error) {
+				if tt.daoErr != nil {
+					return nil, tt.daoErr
 				}
-			} else if err != nil {
-				t.Fatalf("unexpected err: %v", err)
+				return u, nil
+			}}
+			var before repository.User
+			if tt.in != nil {
+				before = *tt.in
 			}
-			if err != nil && errors.Is(err, ErrUserNotFound) {
-				t.Fatal("update must not report user-not-found")
-			}
-			tt.check(t, dao)
-		})
-	}
-}
-
-func TestGetUserNameByName(t *testing.T) {
-	dbErr := errors.New("db down")
-	tests := []struct {
-		name      string
-		setup     func(*fakeDao)
-		query     string
-		wantNil   bool
-		wantErrIs []error
-	}{
-		{"match", func(f *fakeDao) { f.seed("alice", "bob") }, "bob", false, nil},
-		{"no match", func(f *fakeDao) { f.seed("alice") }, "carol", true, nil},
-		{"multiple", func(f *fakeDao) { f.seed("dup", "dup") }, "dup", true, []error{ErrNotUnique, repository.ErrNotUnique}},
-		{"dao error", func(f *fakeDao) { f.findNameErr = dbErr }, "x", true, []error{dbErr}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dao := newFakeDao()
-			tt.setup(dao)
-			before := len(dao.users)
-			got, err := NewService(dao).GetUserNameByName(context.Background(), tt.query)
-			if len(tt.wantErrIs) > 0 {
-				for _, e := range tt.wantErrIs {
-					if !errors.Is(err, e) {
-						t.Fatalf("err = %v, want %v", err, e)
-					}
+			err := NewService(f).UpdateUser(context.Background(), tt.id, tt.in)
+			for _, w := range tt.wantErr {
+				if !errors.Is(err, w) {
+					t.Errorf("err %v not %v", err, w)
 				}
-			} else if err != nil {
-				t.Fatalf("unexpected err: %v", err)
 			}
-			if tt.wantNil {
-				if got != nil {
-					t.Fatalf("want nil, got %+v", got)
+			if tt.in == nil {
+				if len(f.saveCalls) != 0 {
+					t.Error("save called for nil user")
 				}
-			} else if got == nil || got.Name == nil || *got.Name != tt.query {
-				t.Fatalf("got %+v", got)
+				return
 			}
-			if len(dao.users) != before || dao.saveCalls != 0 || dao.deleteCalls != 0 {
-				t.Fatal("read operation mutated store")
+			if len(tt.wantErr) == 0 && err != nil {
+				t.Fatal(err)
+			}
+			if tt.in.ID != tt.id {
+				t.Errorf("id not mutated: %d", tt.in.ID)
+			}
+			if len(f.saveCalls) != 1 || f.saveCalls[0] != tt.in || f.saveIDs[0] != tt.id {
+				t.Fatalf("save not called with the supplied user/id")
+			}
+			before.ID = tt.id
+			if !reflect.DeepEqual(*f.saveCalls[0], before) {
+				t.Errorf("fields changed: %+v", *f.saveCalls[0])
 			}
 		})
 	}
