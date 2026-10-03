@@ -1,4 +1,26 @@
-package user
+// Package repository holds the persistence layer for smartContact. It
+// replaces the Spring Data JPA repositories under
+// com.smartContact.repository.
+//
+// MIGRATION_NOTE: the previous attempt declared `package user` in this file.
+// That made it depend on internal/user, whose files disagree on the package
+// name (model.go says `package model`, errors.go says `package user`). That
+// directory cannot compile. This file now lives in its own directory
+// (internal/smartcontact/repository) as `package repository`. It imports
+// nothing from internal/user, so it compiles no matter how that directory's
+// package clause is resolved.
+//
+// MIGRATION_NOTE (manual review required):
+//   - Once internal/user compiles, replace the local User struct below with
+//     a type alias, `type User = user.User`, so there is one domain type.
+//     The scan code only uses the fields declared here, so nothing else has
+//     to change.
+//   - Spring discovered UserDao through @Repository. Go has no component
+//     scan. cmd/main.go must call NewMySQLRepository(db) after the DB is
+//     opened and after the user schema bootstrap (EnsureSchema in
+//     internal/user/model.go) has run. Then inject the result into the
+//     service layer.
+package repository
 
 import (
 	"context"
@@ -8,25 +30,37 @@ import (
 	"strings"
 )
 
-// MIGRATION_NOTE: this file replaces the Spring Data JPA interface
-// com.smartContact.repository.UserDao (JpaRepository<User, Integer> plus the
-// derived query findByName). Spring generates that implementation at runtime.
-// Here it is written out by hand on top of database/sql for MySQL.
-//
-// MIGRATION_NOTE (manual review required): internal/user/model.go declares
-// `package model` while internal/user/errors.go declares `package user`.
-// Two packages in one directory cannot compile. This file uses `package user`,
-// as the plan and errors.go do, and expects model.go to switch to
-// `package user` as well. When it does, delete one of the two duplicate
-// ErrValidation declarations.
+// User is the persistence view of com.smartContact.model.User, mapped to the
+// `user` table. Nullable Java String fields are *string, so SQL NULL and
+// JSON null round-trip unchanged.
+type User struct {
+	ID       int     `json:"id"`
+	Name     *string `json:"name"`
+	Email    *string `json:"email"`
+	Password *string `json:"password"`
+	Role     *string `json:"role"`
+	About    *string `json:"about"`
+}
+
+// ErrNothingDeleted is returned by DeleteByID when no row matched. It
+// mirrors Spring Data's EmptyResultDataAccessException from deleteById.
+var ErrNothingDeleted = errors.New("no user entity with the given id exists")
+
+// ErrNotUnique is returned by FindByName when more than one row matches. It
+// mirrors Spring Data's IncorrectResultSizeDataAccessException.
+var ErrNotUnique = errors.New("query did not return a unique result")
 
 // ErrInvalidSortProperty is returned when a Sort names a property that the
 // User entity does not have. It mirrors Spring's PropertyReferenceException.
 var ErrInvalidSortProperty = errors.New("no property found for type User")
 
-// ErrInvalidPageRequest is returned for a negative page number or a page size
-// below 1. It mirrors the IllegalArgumentException thrown by PageRequest.of.
+// ErrInvalidPageRequest is returned for a negative page number or a page
+// size below 1. It mirrors the IllegalArgumentException from PageRequest.of.
 var ErrInvalidPageRequest = errors.New("invalid page request")
+
+// ErrNilEntity is returned when a nil *User is passed where an entity is
+// required. It mirrors Spring's "Entity must not be null" check.
+var ErrNilEntity = errors.New("entity must not be nil")
 
 // Direction is a sort direction.
 type Direction int
@@ -66,9 +100,10 @@ type Page struct {
 	TotalPages    int
 }
 
-// Repository is the persistence contract for users. It covers the
-// JpaRepository operations the source inherited plus FindByName.
-type Repository interface {
+// UserDao is the persistence contract for users. It covers the
+// JpaRepository<User, Integer> operations the source inherited plus the
+// derived query findByName.
+type UserDao interface {
 	// Save inserts u when u.ID is 0. Otherwise it updates the row with that
 	// id, or inserts a new row with a generated id if no such row exists
 	// (JPA merge semantics). It returns the saved user.
@@ -107,17 +142,17 @@ type Repository interface {
 	FindByName(ctx context.Context, name string) (*User, bool, error)
 }
 
-// MySQLRepository implements Repository on MySQL.
-type MySQLRepository struct {
+// MySQLUserDao implements UserDao on MySQL.
+type MySQLUserDao struct {
 	db *sql.DB
 }
 
-// NewMySQLRepository returns a Repository backed by db.
-func NewMySQLRepository(db *sql.DB) *MySQLRepository {
-	return &MySQLRepository{db: db}
+// NewMySQLRepository returns a UserDao backed by db.
+func NewMySQLRepository(db *sql.DB) *MySQLUserDao {
+	return &MySQLUserDao{db: db}
 }
 
-var _ Repository = (*MySQLRepository)(nil)
+var _ UserDao = (*MySQLUserDao)(nil)
 
 const userColumns = "user_id, user_name, user_email, user_password, user_role, user_about"
 
@@ -139,8 +174,6 @@ type rowScanner interface {
 
 type queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 func nullToPtr(ns sql.NullString) *string {
@@ -160,7 +193,7 @@ func ptrToNull(p *string) sql.NullString {
 
 func scanUser(s rowScanner) (*User, error) {
 	var (
-		u                                User
+		u                              User
 		name, email, pass, role, about sql.NullString
 	)
 	if err := s.Scan(&u.ID, &name, &email, &pass, &role, &about); err != nil {
@@ -226,10 +259,10 @@ func intsToArgs(ids []int) []any {
 	return args
 }
 
-// Save implements Repository.
-func (r *MySQLRepository) Save(ctx context.Context, u *User) (*User, error) {
+// Save implements UserDao.
+func (r *MySQLUserDao) Save(ctx context.Context, u *User) (*User, error) {
 	if u == nil {
-		return nil, errors.New("user repository: save: entity must not be nil")
+		return nil, fmt.Errorf("user repository: save: %w", ErrNilEntity)
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -247,8 +280,8 @@ func (r *MySQLRepository) Save(ctx context.Context, u *User) (*User, error) {
 	return saved, nil
 }
 
-// SaveAll implements Repository.
-func (r *MySQLRepository) SaveAll(ctx context.Context, users []*User) ([]*User, error) {
+// SaveAll implements UserDao.
+func (r *MySQLUserDao) SaveAll(ctx context.Context, users []*User) ([]*User, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("user repository: save all: begin: %w", err)
@@ -258,7 +291,7 @@ func (r *MySQLRepository) SaveAll(ctx context.Context, users []*User) ([]*User, 
 	out := make([]*User, 0, len(users))
 	for _, u := range users {
 		if u == nil {
-			return nil, errors.New("user repository: save all: entity must not be nil")
+			return nil, fmt.Errorf("user repository: save all: %w", ErrNilEntity)
 		}
 		saved, err := saveTx(ctx, tx, u)
 		if err != nil {
@@ -276,39 +309,39 @@ func (r *MySQLRepository) SaveAll(ctx context.Context, users []*User) ([]*User, 
 // A merge whose id does not exist inserts a new row with a generated id,
 // which is what Hibernate's merge does with a generated identifier.
 func saveTx(ctx context.Context, tx *sql.Tx, u *User) (*User, error) {
-	if u.ID != 0 {
-		var existing int
-		err := tx.QueryRowContext(ctx,
-			"SELECT user_id FROM `user` WHERE user_id = ? FOR UPDATE", u.ID).Scan(&existing)
-		switch {
-		case err == nil:
-			_, err = tx.ExecContext(ctx,
-				"UPDATE `user` SET user_name = ?, user_email = ?, user_password = ?, user_role = ?, user_about = ? WHERE user_id = ?",
-				ptrToNull(u.Name), ptrToNull(u.Email), ptrToNull(u.Password),
-				ptrToNull(u.Role), ptrToNull(u.About), u.ID)
-			if err != nil {
-				return nil, fmt.Errorf("update id %d: %w", u.ID, err)
-			}
-			merged := *u
-			return &merged, nil
-		case errors.Is(err, sql.ErrNoRows):
-			// The id was supplied but does not exist: merge inserts a new
-			// row with a generated id and returns a copy.
-			merged := *u
-			if err := insertTx(ctx, tx, &merged); err != nil {
-				return nil, err
-			}
-			return &merged, nil
-		default:
-			return nil, fmt.Errorf("lock id %d: %w", u.ID, err)
+	if u.ID == 0 {
+		// New entity (persist). The id is assigned to the passed instance,
+		// as JPA persist does.
+		if err := insertTx(ctx, tx, u); err != nil {
+			return nil, err
 		}
+		return u, nil
 	}
-	// New entity (persist). The id is assigned to the passed instance, as
-	// JPA persist does.
-	if err := insertTx(ctx, tx, u); err != nil {
-		return nil, err
+
+	var existing int
+	err := tx.QueryRowContext(ctx,
+		"SELECT user_id FROM `user` WHERE user_id = ? FOR UPDATE", u.ID).Scan(&existing)
+	switch {
+	case err == nil:
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE `user` SET user_name = ?, user_email = ?, user_password = ?, user_role = ?, user_about = ? WHERE user_id = ?",
+			ptrToNull(u.Name), ptrToNull(u.Email), ptrToNull(u.Password),
+			ptrToNull(u.Role), ptrToNull(u.About), u.ID); err != nil {
+			return nil, fmt.Errorf("update id %d: %w", u.ID, err)
+		}
+		merged := *u
+		return &merged, nil
+	case errors.Is(err, sql.ErrNoRows):
+		// The id was supplied but does not exist: merge inserts a new row
+		// with a generated id and returns a copy.
+		merged := *u
+		if err := insertTx(ctx, tx, &merged); err != nil {
+			return nil, err
+		}
+		return &merged, nil
+	default:
+		return nil, fmt.Errorf("lock id %d: %w", u.ID, err)
 	}
-	return u, nil
 }
 
 func insertTx(ctx context.Context, tx *sql.Tx, u *User) error {
@@ -327,8 +360,8 @@ func insertTx(ctx context.Context, tx *sql.Tx, u *User) error {
 	return nil
 }
 
-// FindByID implements Repository.
-func (r *MySQLRepository) FindByID(ctx context.Context, id int) (*User, bool, error) {
+// FindByID implements UserDao.
+func (r *MySQLUserDao) FindByID(ctx context.Context, id int) (*User, bool, error) {
 	u, err := scanUser(r.db.QueryRowContext(ctx, selectUsers+" WHERE user_id = ?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
@@ -339,8 +372,8 @@ func (r *MySQLRepository) FindByID(ctx context.Context, id int) (*User, bool, er
 	return u, true, nil
 }
 
-// ExistsByID implements Repository.
-func (r *MySQLRepository) ExistsByID(ctx context.Context, id int) (bool, error) {
+// ExistsByID implements UserDao.
+func (r *MySQLUserDao) ExistsByID(ctx context.Context, id int) (bool, error) {
 	var n int64
 	if err := r.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM `user` WHERE user_id = ?", id).Scan(&n); err != nil {
@@ -349,8 +382,8 @@ func (r *MySQLRepository) ExistsByID(ctx context.Context, id int) (bool, error) 
 	return n > 0, nil
 }
 
-// FindAll implements Repository.
-func (r *MySQLRepository) FindAll(ctx context.Context) ([]*User, error) {
+// FindAll implements UserDao.
+func (r *MySQLUserDao) FindAll(ctx context.Context) ([]*User, error) {
 	users, err := queryUsers(ctx, r.db, selectUsers)
 	if err != nil {
 		return nil, fmt.Errorf("user repository: find all: %w", err)
@@ -358,8 +391,8 @@ func (r *MySQLRepository) FindAll(ctx context.Context) ([]*User, error) {
 	return users, nil
 }
 
-// FindAllSorted implements Repository.
-func (r *MySQLRepository) FindAllSorted(ctx context.Context, s Sort) ([]*User, error) {
+// FindAllSorted implements UserDao.
+func (r *MySQLUserDao) FindAllSorted(ctx context.Context, s Sort) ([]*User, error) {
 	order, err := orderByClause(s)
 	if err != nil {
 		return nil, fmt.Errorf("user repository: find all sorted: %w", err)
@@ -371,8 +404,8 @@ func (r *MySQLRepository) FindAllSorted(ctx context.Context, s Sort) ([]*User, e
 	return users, nil
 }
 
-// FindAllPaged implements Repository.
-func (r *MySQLRepository) FindAllPaged(ctx context.Context, p PageRequest) (Page, error) {
+// FindAllPaged implements UserDao.
+func (r *MySQLUserDao) FindAllPaged(ctx context.Context, p PageRequest) (Page, error) {
 	if p.Page < 0 || p.Size < 1 {
 		return Page{}, fmt.Errorf("user repository: find all paged: %w: page=%d size=%d",
 			ErrInvalidPageRequest, p.Page, p.Size)
@@ -400,8 +433,8 @@ func (r *MySQLRepository) FindAllPaged(ctx context.Context, p PageRequest) (Page
 	}, nil
 }
 
-// FindAllByID implements Repository.
-func (r *MySQLRepository) FindAllByID(ctx context.Context, ids []int) ([]*User, error) {
+// FindAllByID implements UserDao.
+func (r *MySQLUserDao) FindAllByID(ctx context.Context, ids []int) ([]*User, error) {
 	if len(ids) == 0 {
 		return make([]*User, 0), nil
 	}
@@ -413,8 +446,8 @@ func (r *MySQLRepository) FindAllByID(ctx context.Context, ids []int) ([]*User, 
 	return users, nil
 }
 
-// Count implements Repository.
-func (r *MySQLRepository) Count(ctx context.Context) (int64, error) {
+// Count implements UserDao.
+func (r *MySQLUserDao) Count(ctx context.Context) (int64, error) {
 	var n int64
 	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM `user`").Scan(&n); err != nil {
 		return 0, fmt.Errorf("user repository: count: %w", err)
@@ -422,8 +455,8 @@ func (r *MySQLRepository) Count(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// DeleteByID implements Repository.
-func (r *MySQLRepository) DeleteByID(ctx context.Context, id int) error {
+// DeleteByID implements UserDao.
+func (r *MySQLUserDao) DeleteByID(ctx context.Context, id int) error {
 	res, err := r.db.ExecContext(ctx, "DELETE FROM `user` WHERE user_id = ?", id)
 	if err != nil {
 		return fmt.Errorf("user repository: delete by id %d: %w", id, err)
@@ -438,10 +471,10 @@ func (r *MySQLRepository) DeleteByID(ctx context.Context, id int) error {
 	return nil
 }
 
-// Delete implements Repository.
-func (r *MySQLRepository) Delete(ctx context.Context, u *User) error {
+// Delete implements UserDao.
+func (r *MySQLUserDao) Delete(ctx context.Context, u *User) error {
 	if u == nil {
-		return errors.New("user repository: delete: entity must not be nil")
+		return fmt.Errorf("user repository: delete: %w", ErrNilEntity)
 	}
 	if u.ID == 0 {
 		return nil // new entity: nothing to delete, as in SimpleJpaRepository
@@ -452,8 +485,8 @@ func (r *MySQLRepository) Delete(ctx context.Context, u *User) error {
 	return nil
 }
 
-// DeleteAllByID implements Repository.
-func (r *MySQLRepository) DeleteAllByID(ctx context.Context, ids []int) error {
+// DeleteAllByID implements UserDao.
+func (r *MySQLUserDao) DeleteAllByID(ctx context.Context, ids []int) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -464,19 +497,20 @@ func (r *MySQLRepository) DeleteAllByID(ctx context.Context, ids []int) error {
 	return nil
 }
 
-// DeleteAll implements Repository.
-func (r *MySQLRepository) DeleteAll(ctx context.Context) error {
+// DeleteAll implements UserDao.
+func (r *MySQLUserDao) DeleteAll(ctx context.Context) error {
 	if _, err := r.db.ExecContext(ctx, "DELETE FROM `user`"); err != nil {
 		return fmt.Errorf("user repository: delete all: %w", err)
 	}
 	return nil
 }
 
-// FindByName implements Repository. It replaces the derived query
-// UserDao.findByName (WHERE user_name = ?). Spring Data throws
-// IncorrectResultSizeDataAccessException when more than one row matches;
-// this returns ErrNotUnique instead.
-func (r *MySQLRepository) FindByName(ctx context.Context, name string) (*User, bool, error) {
+// FindByName implements UserDao. It replaces the derived query
+// UserDao.findByName (WHERE user_name = ?). Java returned null when no user
+// matched. Here the bool is false instead. Spring Data throws
+// IncorrectResultSizeDataAccessException when more than one row matches.
+// This returns ErrNotUnique instead.
+func (r *MySQLUserDao) FindByName(ctx context.Context, name string) (*User, bool, error) {
 	users, err := queryUsers(ctx, r.db, selectUsers+" WHERE user_name = ? LIMIT 2", name)
 	if err != nil {
 		return nil, false, fmt.Errorf("user repository: find by name: %w", err)
