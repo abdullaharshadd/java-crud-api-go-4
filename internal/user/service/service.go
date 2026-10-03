@@ -8,50 +8,51 @@ import (
 	"migrated-app/internal/user/repository"
 )
 
-// Service is the business-layer contract for user operations. It replaces
-// com.smartContact.service.UserService and its implementation
-// UserServiceImp. HTTP handlers depend on this interface.
+// UserService is the business-layer contract for user operations. It
+// replaces com.smartContact.service.UserService and its implementation
+// UserServiceImp. HTTP handlers depend on this interface, not on the
+// concrete implementation.
 //
-// MIGRATION_NOTE: the User type here is repository.User. model.go in this
-// directory declares `package model`, while errors.go and this file declare
-// `package user`. Once that clash is fixed and model.User is the single
-// domain type, switch this to that type (or alias repository.User to it).
-type Service interface {
-	// SaveUser persists u and returns the saved entity with its generated
-	// id filled in.
+// MIGRATION_NOTE: the entity type is repository.User because model.go in
+// this directory declares `package model` while errors.go (and this file)
+// declare `package user`. Until that clash is fixed, this package cannot
+// import its own model. Once it is fixed, alias repository.User to the
+// single domain User type.
+type UserService interface {
+	// SaveUser persists u and returns the saved entity with its id set.
 	SaveUser(ctx context.Context, u *repository.User) (*repository.User, error)
 	// FetchUserList returns every stored user. The slice is never nil.
 	FetchUserList(ctx context.Context) ([]*repository.User, error)
 	// FetchUserByID returns the user with the given id. If there is none,
-	// the error matches ErrUserNotFound and is a *NotFoundError.
+	// the error is a *NotFoundError that matches ErrUserNotFound.
 	FetchUserByID(ctx context.Context, id int) (*repository.User, error)
-	// DeleteUser removes the user with the given id. If no row matched,
-	// the error wraps ErrNothingDeleted.
+	// DeleteUser removes the user with the given id.
 	DeleteUser(ctx context.Context, id int) error
-	// UpdateUser sets u's id to id and saves it, using JPA merge semantics.
-	// If id does not exist, a new row with a generated id is inserted.
+	// UpdateUser sets u's id to id and saves it. With JPA merge semantics,
+	// the row is overwritten if it exists. Otherwise a new row is created.
 	UpdateUser(ctx context.Context, id int, u *repository.User) error
-	// GetUserNameByName looks up a user by exact name. It returns
-	// (nil, nil) when no user matches, mirroring the Java null return.
-	GetUserNameByName(ctx context.Context, name string) (*repository.User, error)
+	// GetUserNameByName looks up a user by exact name. The bool is false
+	// when no user matches, which was a null return in Java.
+	GetUserNameByName(ctx context.Context, name string) (*repository.User, bool, error)
 }
 
-// service is the default Service, backed by a repository.UserDao.
-type service struct {
+// userService is the default UserService, backed by a repository.UserDao.
+type userService struct {
 	dao repository.UserDao
 }
 
-// NewService returns a Service that uses dao for persistence. It replaces
-// Spring's @Service and @Autowired wiring. Call it from cmd/server/main.go
-// after the repository has been built.
-func NewService(dao repository.UserDao) Service {
-	return &service{dao: dao}
+// NewService returns a UserService that uses dao for persistence. It
+// replaces Spring's @Service and @Autowired field injection. Call it from
+// cmd/server/main.go after building the repository.
+func NewService(dao repository.UserDao) UserService {
+	return &userService{dao: dao}
 }
 
+// errNilUser is reported when a nil user is passed to a write operation.
 var errNilUser = errors.New("user must not be nil")
 
-// SaveUser implements Service.
-func (s *service) SaveUser(ctx context.Context, u *repository.User) (*repository.User, error) {
+// SaveUser implements UserService.
+func (s *userService) SaveUser(ctx context.Context, u *repository.User) (*repository.User, error) {
 	if u == nil {
 		return nil, fmt.Errorf("save user: %w: %w", ErrValidation, errNilUser)
 	}
@@ -62,8 +63,8 @@ func (s *service) SaveUser(ctx context.Context, u *repository.User) (*repository
 	return saved, nil
 }
 
-// FetchUserList implements Service.
-func (s *service) FetchUserList(ctx context.Context) ([]*repository.User, error) {
+// FetchUserList implements UserService.
+func (s *userService) FetchUserList(ctx context.Context) ([]*repository.User, error) {
 	users, err := s.dao.FindAll(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("fetch user list: %w", err)
@@ -74,8 +75,8 @@ func (s *service) FetchUserList(ctx context.Context) ([]*repository.User, error)
 	return users, nil
 }
 
-// FetchUserByID implements Service.
-func (s *service) FetchUserByID(ctx context.Context, id int) (*repository.User, error) {
+// FetchUserByID implements UserService.
+func (s *userService) FetchUserByID(ctx context.Context, id int) (*repository.User, error) {
 	u, ok, err := s.dao.FindByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("fetch user %d: %w", id, err)
@@ -87,12 +88,12 @@ func (s *service) FetchUserByID(ctx context.Context, id int) (*repository.User, 
 	return u, nil
 }
 
-// DeleteUser implements Service.
-func (s *service) DeleteUser(ctx context.Context, id int) error {
+// DeleteUser implements UserService.
+func (s *userService) DeleteUser(ctx context.Context, id int) error {
 	if err := s.dao.DeleteByID(ctx, id); err != nil {
 		if errors.Is(err, repository.ErrNothingDeleted) {
-			// Map the repository sentinel onto the package-level one, so
-			// handlers only need errors.Is(err, ErrNothingDeleted).
+			// Spring Data's deleteById threw EmptyResultDataAccessException.
+			// Translate the repository sentinel to the package-level one.
 			return fmt.Errorf("delete user %d: %w: %w", id, ErrNothingDeleted, err)
 		}
 		return fmt.Errorf("delete user %d: %w", id, err)
@@ -100,8 +101,8 @@ func (s *service) DeleteUser(ctx context.Context, id int) error {
 	return nil
 }
 
-// UpdateUser implements Service.
-func (s *service) UpdateUser(ctx context.Context, id int, u *repository.User) error {
+// UpdateUser implements UserService.
+func (s *userService) UpdateUser(ctx context.Context, id int, u *repository.User) error {
 	if u == nil {
 		return fmt.Errorf("update user %d: %w: %w", id, ErrValidation, errNilUser)
 	}
@@ -112,17 +113,17 @@ func (s *service) UpdateUser(ctx context.Context, id int, u *repository.User) er
 	return nil
 }
 
-// GetUserNameByName implements Service.
-func (s *service) GetUserNameByName(ctx context.Context, name string) (*repository.User, error) {
+// GetUserNameByName implements UserService.
+func (s *userService) GetUserNameByName(ctx context.Context, name string) (*repository.User, bool, error) {
 	u, ok, err := s.dao.FindByName(ctx, name)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotUnique) {
-			return nil, fmt.Errorf("get user by name: %w: %w", ErrNotUnique, err)
+			return nil, false, fmt.Errorf("get user by name: %w: %w", ErrNotUnique, err)
 		}
-		return nil, fmt.Errorf("get user by name: %w", err)
+		return nil, false, fmt.Errorf("get user by name: %w", err)
 	}
 	if !ok {
-		return nil, nil
+		return nil, false, nil
 	}
-	return u, nil
+	return u, true, nil
 }
